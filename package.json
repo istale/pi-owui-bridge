@@ -1,7 +1,7 @@
 {
   "name": "pi-owui-bridge",
   "version": "0.1.0",
-  "description": "TS bridge that fronts Open WebUI with @earendil-works/pi-coding-agent's AgentHarness.",
+  "description": "TypeScript service that fronts Open WebUI with an OpenAI-compatible agent loop and dispatches tool calls back to OWUI's HTTP tool service. Phase 1 runs its own loop; Phase 2 will swap it for @earendil-works/pi-agent-core's AgentHarness.",
   "type": "module",
   "private": true,
   "bin": { "pi-owui-bridge": "dist/server.js" },

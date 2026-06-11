@@ -1,16 +1,23 @@
 # pi-owui-bridge
 
-TypeScript bridge that fronts Open WebUI's chat completions with a Pi-style
-agent runtime. Replaces the Python `pi-adapter` while leaving every other
-piece (Open WebUI's tool HTTP service, Hub overlay snapshots, ledger
-correlation) unchanged.
+TypeScript service that fronts Open WebUI's chat completions and dispatches
+tool calls back to OWUI's HTTP tool service. Replaces the Python `pi-adapter`
+while leaving every other piece (Open WebUI's tool HTTP service, Hub overlay
+snapshots, ledger correlation) unchanged.
 
-## Why TS, not Python
+> **Status: Phase 1.** The agent loop in `src/agent-loop.ts` is currently a
+> direct OpenAI-compatible HTTP loop in this repo. `@earendil-works/pi-agent-core`
+> is **installed but not yet driving the loop**; the wire contract and all
+> surrounding wiring are built so Phase 2 can swap the loop body for
+> Pi's `AgentHarness` without touching anything else.
 
-The Python adapter reinvented an agent loop (model → tool → model →
-streaming). TypeScript lets us depend on `@earendil-works/pi-agent-core`
-so future upstream Pi improvements (provider compat, streaming bug fixes,
+## Why TS
+
+When Phase 2 lands, depending on `@earendil-works/pi-agent-core` means
+future upstream Pi improvements (provider compat, streaming bug fixes,
 retry tuning) flow in via `npm update` instead of being ported by hand.
+The Python `pi-adapter` reinvented an agent loop that would otherwise
+need that maintenance burden ourselves.
 
 ## What's in scope (Phase 1)
 
@@ -25,13 +32,16 @@ retry tuning) flow in via `npm update` instead of being ported by hand.
 
 ## What's deferred (Phase 2)
 
-- Switching the body of `runAgentLoop` to use `AgentHarness` from
-  `@earendil-works/pi-agent-core`. The surrounding wiring (tool client,
-  overlay loader, skills loader, observation emitter, server) is built
-  to make that a one-file swap.
-- True mid-flight SSE streaming with tool dispatch (current streaming
-  endpoint runs the non-stream loop and emits the final assistant
-  message as one SSE chunk).
+- **AgentHarness wiring.** Switching the body of `runAgentLoop` to use
+  `AgentHarness` from `@earendil-works/pi-agent-core`. The surrounding
+  wiring (tool client, overlay loader, skills loader, observation
+  emitter, server) is built to make that a one-file swap.
+- **Real mid-flight SSE streaming.** The `stream: true` endpoint
+  currently runs the non-stream loop end-to-end, then emits the final
+  assistant message as one SSE chunk plus `[DONE]`. The user sees the
+  full answer once the loop completes — not token-by-token. The
+  response carries `X-Aoh-Trace-Id` and the chunk includes
+  `pi_adapter.iterations` so callers can still inspect what happened.
 
 ## Environment
 
