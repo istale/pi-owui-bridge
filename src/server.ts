@@ -172,8 +172,8 @@ export async function createApp(opts?: Partial<BridgeContext>): Promise<express.
           aoh_trace_id: aohTraceId,
           iterations: result.iterations,
           tool_call_count: result.toolCallCount,
-          overlay: { applied: overlays.length },
-          skills: { applied: skills.length, names: skills.map((s) => s.name) },
+          overlay: { applied: overlays.length, annotation_chars: composed.overlayCharCount },
+          skills: { applied: skills.length, preamble_chars: composed.skillCharCount, names: skills.map((s) => s.name) },
         },
       });
     } catch (err) {
