@@ -123,6 +123,8 @@ export async function createApp(opts?: Partial<BridgeContext>): Promise<express.
           upstream: bridge.upstream,
           toolClient: bridge.toolClient,
           ctx: { userId, chatId, messageId, aohTraceId, maxIterations: cfg.maxToolIterations },
+          upstreamBaseUrl: cfg.upstreamBaseUrl,
+          upstreamApiKey: cfg.upstreamApiKey,
         });
         const final = result.finalResponse.choices?.[0]?.message;
         const chunk = {
@@ -153,6 +155,8 @@ export async function createApp(opts?: Partial<BridgeContext>): Promise<express.
         upstream: bridge.upstream,
         toolClient: bridge.toolClient,
         ctx: { userId, chatId, messageId, aohTraceId, maxIterations: cfg.maxToolIterations },
+        upstreamBaseUrl: cfg.upstreamBaseUrl,
+        upstreamApiKey: cfg.upstreamApiKey,
       });
       bridge.emitter.emit({
         stage: "agent_loop_completed",

@@ -46,7 +46,7 @@ function assistantFinal(text: string) {
 describe("runAgentLoop", () => {
   it("returns immediately when no tool calls", async () => {
     const upstream = fakeUpstream([assistantFinal("hello")]);
-    const out = await runAgentLoop({
+    const out = await runAgentLoop({ runtime: "self",
       initialPayload: { model: "m", messages: [{ role: "user", content: "hi" }] },
       toolSpecs: [],
       upstream,
@@ -74,7 +74,7 @@ describe("runAgentLoop", () => {
       expect(call.aohTraceId).toBe("tr-2");
       return { ok: true, result: { items: ["d1"] } };
     });
-    const out = await runAgentLoop({
+    const out = await runAgentLoop({ runtime: "self",
       initialPayload: { model: "m", messages: [{ role: "user", content: "go" }] },
       toolSpecs: [{ name: "list_datasets", parameters: { type: "object", properties: {} } }],
       upstream,
@@ -97,7 +97,7 @@ describe("runAgentLoop", () => {
         return assistantFinal("recovered");
       },
     ]);
-    const out = await runAgentLoop({
+    const out = await runAgentLoop({ runtime: "self",
       initialPayload: { model: "m", messages: [{ role: "user", content: "go" }] },
       toolSpecs: [{ name: "query_dataset", parameters: { type: "object" } }],
       upstream,
@@ -131,7 +131,7 @@ describe("runAgentLoop", () => {
     const toolClient = fakeToolClient(() => {
       throw new Error("must not be called on parse failure");
     });
-    const out = await runAgentLoop({
+    const out = await runAgentLoop({ runtime: "self",
       initialPayload: { model: "m", messages: [] },
       toolSpecs: [{ name: "list_datasets", parameters: {} }],
       upstream,
@@ -143,7 +143,7 @@ describe("runAgentLoop", () => {
 
   it("respects maxIterations", async () => {
     const upstream = fakeUpstream([assistantWithToolCall("list_datasets", {})]);
-    const out = await runAgentLoop({
+    const out = await runAgentLoop({ runtime: "self",
       initialPayload: { model: "m", messages: [] },
       toolSpecs: [{ name: "list_datasets", parameters: {} }],
       upstream,

@@ -9,9 +9,12 @@
     "outDir": "dist",
     "rootDir": "src",
     "declaration": true,
+    "noEmitOnError": false,
+    "preserveSymlinks": true,
     "sourceMap": true,
     "allowImportingTsExtensions": false,
     "resolveJsonModule": true
   },
-  "include": ["src/**/*.ts"]
+  "include": ["src/**/*.ts"],
+  "exclude": ["node_modules/@earendil-works/**/test/**", "node_modules/@earendil-works/**/src/**", "node_modules/@earendil-works/**/*.test.ts"]
 }

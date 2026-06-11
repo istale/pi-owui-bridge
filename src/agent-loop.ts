@@ -1,14 +1,19 @@
 /**
  * Tool-using agent loop.
  *
- * Phase 1 implementation: direct OpenAI-compatible HTTP calls. Phase 2
- * (follow-up commit) will swap the body of ``runAgentLoop`` with an
- * ``AgentHarness`` from ``@earendil-works/pi-agent-core`` so we ride
- * upstream Pi improvements; all surrounding wiring (tool client,
- * overlay, skills, observation) stays as-is.
+ * Two backends are available behind a single function: the
+ * "self" loop in this file (kept as a fallback / comparison point)
+ * and the AgentHarness-driven loop in ``./pi-harness/runtime.ts``
+ * which dispatches through Pi's runtime so upstream provider/streaming
+ * fixes flow in via ``npm update``.
+ *
+ * Pick at process start via ``AOH_RUNTIME=harness`` (default) or
+ * ``AOH_RUNTIME=self``.
  */
 import type { AssistantMessage, Message, ToolCall } from "./openai-types.js";
+import { runWithHarness } from "./pi-harness/runtime.js";
 import type { ToolClient } from "./tool-client.js";
+import type { ToolSpec } from "./tool-client.js";
 import type { UpstreamClient, UpstreamRequest } from "./upstream.js";
 
 export interface AgentLoopContext {
@@ -32,13 +37,71 @@ function stringifyToolResult(result: { ok: boolean; result?: unknown; error_code
   return JSON.stringify({ error: result.error_code ?? "ToolError", message: result.error_message ?? "" });
 }
 
-export async function runAgentLoop(opts: {
+export type RuntimeMode = "harness" | "self";
+
+export function resolveRuntime(envValue: string | undefined = process.env.AOH_RUNTIME): RuntimeMode {
+  const v = (envValue ?? "").trim().toLowerCase();
+  if (v === "self") return "self";
+  return "harness";
+}
+
+export interface AgentLoopRunOptions {
   initialPayload: UpstreamRequest;
   toolSpecs: Array<Record<string, unknown>>;
   upstream: UpstreamClient;
   toolClient: ToolClient;
   ctx: AgentLoopContext;
-}): Promise<AgentLoopResult> {
+  /** Upstream baseUrl and apiKey are needed by the AgentHarness runtime path
+   *  (it constructs its own Pi Model object pointed at Hub). Optional so
+   *  callers using ``self`` mode don't have to supply them. */
+  upstreamBaseUrl?: string;
+  upstreamApiKey?: string;
+  /** Override the runtime — useful for tests. Defaults to env. */
+  runtime?: RuntimeMode;
+}
+
+export async function runAgentLoop(opts: AgentLoopRunOptions): Promise<AgentLoopResult> {
+  const runtime = opts.runtime ?? resolveRuntime();
+  if (runtime === "harness") return runAgentLoopHarness(opts);
+  return runAgentLoopSelf(opts);
+}
+
+async function runAgentLoopHarness(opts: AgentLoopRunOptions): Promise<AgentLoopResult> {
+  if (!opts.upstreamBaseUrl || !opts.upstreamApiKey) {
+    throw new Error("harness runtime requires upstreamBaseUrl + upstreamApiKey");
+  }
+  const messages = (opts.initialPayload.messages ?? []) as Message[];
+  const out = await runWithHarness({
+    messages,
+    modelId: (opts.initialPayload.model as string) ?? "MiniMax-M2",
+    toolSpecs: opts.toolSpecs as unknown as ToolSpec[],
+    toolClient: opts.toolClient,
+    upstream: opts.upstream,
+    ctx: opts.ctx,
+    hubBaseUrl: opts.upstreamBaseUrl,
+    hubApiKey: opts.upstreamApiKey,
+  });
+
+  // Shape the result like the existing OpenAI chat completion response so
+  // callers (server.ts, e2e scenarios) can treat both runtimes identically.
+  const finalText = (out.assistant.content ?? [])
+    .filter((b) => b.type === "text")
+    .map((b) => (b as { type: "text"; text: string }).text)
+    .join("");
+  const finalResponse = {
+    id: `harness-${opts.ctx.aohTraceId}`,
+    choices: [
+      {
+        index: 0,
+        message: { role: "assistant" as const, content: finalText },
+        finish_reason: out.assistant.stopReason ?? "stop",
+      },
+    ],
+  };
+  return { finalResponse, iterations: out.modelCallCount, toolCallCount: out.toolCallCount };
+}
+
+async function runAgentLoopSelf(opts: AgentLoopRunOptions): Promise<AgentLoopResult> {
   const payload: UpstreamRequest = { ...opts.initialPayload, messages: [...(opts.initialPayload.messages ?? [])] };
   if (opts.toolSpecs.length > 0) {
     payload.tools = opts.toolSpecs.map((spec) => ({ type: "function", function: spec }));

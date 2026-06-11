@@ -5,11 +5,12 @@ tool calls back to OWUI's HTTP tool service. Replaces the Python `pi-adapter`
 while leaving every other piece (Open WebUI's tool HTTP service, Hub overlay
 snapshots, ledger correlation) unchanged.
 
-> **Status: Phase 1.** The agent loop in `src/agent-loop.ts` is currently a
-> direct OpenAI-compatible HTTP loop in this repo. `@earendil-works/pi-agent-core`
-> is **installed but not yet driving the loop**; the wire contract and all
-> surrounding wiring are built so Phase 2 can swap the loop body for
-> Pi's `AgentHarness` without touching anything else.
+> **Status: Phase 2.** The agent loop runs through Pi's `AgentHarness`
+> from `@earendil-works/pi-agent-core` by default (`AOH_RUNTIME=harness`).
+> Pi's `streamSimple` does the actual model call so upstream provider /
+> streaming fixes ride in via `npm update`. The legacy self-written loop
+> stays in `src/agent-loop.ts` behind `AOH_RUNTIME=self` for comparison
+> and emergency fallback.
 
 ## Why TS
 
@@ -30,18 +31,28 @@ need that maintenance burden ourselves.
 - Observation events emitted as JSONL the hub tailer already ingests
 - 29 vitest cases covering each module
 
-## What's deferred (Phase 2)
+## Runtime mode
 
-- **AgentHarness wiring.** Switching the body of `runAgentLoop` to use
-  `AgentHarness` from `@earendil-works/pi-agent-core`. The surrounding
-  wiring (tool client, overlay loader, skills loader, observation
-  emitter, server) is built to make that a one-file swap.
+| `AOH_RUNTIME=` | What it does |
+|---|---|
+| `harness` (default) | `runAgentLoop` delegates to `runWithHarness` in `src/pi-harness/runtime.ts`. AgentHarness drives the loop with `InMemorySessionRepo` (nothing persists to disk) and a Hub-backed Model built via pi-ai's provider system. |
+| `self` | The original Phase-1 self-written OpenAI HTTP loop. Kept as a fallback / A-B comparison. |
+
+Both modes go through the same `server.ts` wiring (overlay, skills,
+observation, response shape) and emit byte-equivalent
+`pi_adapter.aoh_trace_id` / `pi_adapter.overlay` / `pi_adapter.skills`
+metadata so e2e scenarios run unchanged against either.
+
+## What's deferred
+
 - **Real mid-flight SSE streaming.** The `stream: true` endpoint
   currently runs the non-stream loop end-to-end, then emits the final
   assistant message as one SSE chunk plus `[DONE]`. The user sees the
   full answer once the loop completes — not token-by-token. The
   response carries `X-Aoh-Trace-Id` and the chunk includes
   `pi_adapter.iterations` so callers can still inspect what happened.
+  Real streaming will land by subscribing to AgentHarness's
+  `text_delta` / `tool_call_arguments_delta` events.
 
 ## Environment
 
