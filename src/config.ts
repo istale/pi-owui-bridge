@@ -1,20 +1,21 @@
 /**
- * Process-level config read once from the environment. Mirrors the env
- * surface of the (now superseded) Python pi-adapter so the same .env
- * keeps working.
+ * Process-level config. RPC-mode bridge needs many fewer knobs than the
+ * old loop-driving bridge: we only point at things that the spawned Pi
+ * process needs to know about.
  */
 export interface BridgeConfig {
-  readonly upstreamBaseUrl: string;
-  readonly upstreamApiKey: string;
-  readonly upstreamModel: string;
-  readonly upstreamProvider: string;
+  readonly hubBaseUrl: string;
+  readonly hubApiKey: string;
+  readonly modelProvider: string;
+  readonly modelId: string;
   readonly owuiBaseUrl: string;
   readonly piSharedSecret: string;
-  readonly maxToolIterations: number;
-  readonly requestTimeoutMs: number;
   readonly observationDir: string | null;
   readonly skillsDir: string | null;
+  readonly piCliPath: string;
+  readonly extensionPath: string;
   readonly port: number;
+  readonly idleEvictMs: number;
 }
 
 function req(name: string): string {
@@ -32,17 +33,18 @@ let cached: BridgeConfig | null = null;
 export function getConfig(): BridgeConfig {
   if (cached) return cached;
   cached = {
-    upstreamBaseUrl: req("AOH_UPSTREAM_BASE_URL"),
-    upstreamApiKey: req("AOH_UPSTREAM_API_KEY"),
-    upstreamModel: opt("AOH_UPSTREAM_MODEL", "MiniMax-M2"),
-    upstreamProvider: opt("AOH_UPSTREAM_PROVIDER", "openai-completions"),
+    hubBaseUrl: req("AOH_UPSTREAM_BASE_URL"),
+    hubApiKey: req("AOH_UPSTREAM_API_KEY"),
+    modelProvider: opt("AOH_UPSTREAM_PROVIDER", "aoh-hub"),
+    modelId: opt("AOH_UPSTREAM_MODEL", "MiniMax-M2"),
     owuiBaseUrl: req("AOH_OWUI_BASE_URL"),
     piSharedSecret: req("AOH_PI_SHARED_SECRET"),
-    maxToolIterations: Number(opt("AOH_MAX_TOOL_ITERATIONS", "8")),
-    requestTimeoutMs: Number(opt("AOH_REQUEST_TIMEOUT_S", "120")) * 1000,
     observationDir: process.env.AOH_OBSERVATION_DIR?.trim() || null,
     skillsDir: process.env.AOH_SKILLS_DIR?.trim() || null,
+    piCliPath: req("AOH_PI_CLI_PATH"),
+    extensionPath: req("AOH_PI_EXTENSION_PATH"),
     port: Number(opt("AOH_BRIDGE_PORT", "19000")),
+    idleEvictMs: Number(opt("AOH_PI_IDLE_EVICT_MS", "300000")), // 5 min default
   };
   return cached;
 }

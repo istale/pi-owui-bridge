@@ -1,207 +1,152 @@
 /**
- * pi-owui-bridge — Express server.
+ * pi-owui-bridge: pure communication layer.
  *
- * One per-request agent loop composed of:
- *   composeMessages(skills + system + overlay)
- *   → runAgentLoop(upstream + OWUI tool dispatch)
- *   → optional SSE streaming back
- *   → emit before/after observation events
- *
- * The HTTP surface is OpenAI-compatible so Open WebUI's existing chat
- * forwarder needs only a base-URL change to talk to this service.
+ * Translates the OpenAI ``/v1/chat/completions`` HTTP contract Open WebUI
+ * speaks into Pi's stdin/stdout RPC, and vice versa. There is no agent
+ * loop in this repo — Pi runs the loop in a subprocess per (user_id,
+ * chat_id). The extension at ``./extension/owui-tools.ts`` teaches that
+ * Pi about Open WebUI's HTTP tool surface.
  */
-import express, { type Request, type Response } from "express";
-import { randomUUID } from "node:crypto";
+import express from "express";
 
 import { getConfig } from "./config.js";
-import { runAgentLoop } from "./agent-loop.js";
-import { ObservationEmitter } from "./observation.js";
-import { applyToMessages, loadOverlays } from "./overlay.js";
-import { loadSkills } from "./skills.js";
-import { composeMessages } from "./system-prompt.js";
-import { ToolClient, type ToolSpec } from "./tool-client.js";
-import { UpstreamClient } from "./upstream.js";
+import type { Message as OwuiMessage } from "./openai-types.js";
+import { PiPool, makeTraceId } from "./pi-process.js";
 
-interface BridgeContext {
-  toolClient: ToolClient;
-  upstream: UpstreamClient;
-  emitter: ObservationEmitter;
-  toolSpecs: ToolSpec[];
-  toolSpecsLoadedAt: number;
+interface AppDeps {
+  pool: PiPool;
 }
 
-let bridge: BridgeContext | null = null;
-
-export async function createApp(opts?: Partial<BridgeContext>): Promise<express.Express> {
-  const cfg = getConfig();
-  const toolClient = opts?.toolClient ?? new ToolClient(cfg.owuiBaseUrl, cfg.piSharedSecret);
-  const upstream = opts?.upstream ?? new UpstreamClient(cfg.upstreamBaseUrl, cfg.upstreamApiKey, cfg.requestTimeoutMs);
-  const emitter = opts?.emitter ?? new ObservationEmitter(cfg.observationDir);
-
-  let toolSpecs: ToolSpec[];
-  if (opts?.toolSpecs) {
-    toolSpecs = opts.toolSpecs;
-  } else {
-    try {
-      toolSpecs = await toolClient.listToolSpecs();
-    } catch (err) {
-      console.warn("startup tool discovery failed; continuing with empty tool set:", err);
-      toolSpecs = [];
+function extractLatestUserText(messages: OwuiMessage[]): string {
+  for (let i = messages.length - 1; i >= 0; i -= 1) {
+    if (messages[i].role === "user") {
+      const c = messages[i].content;
+      return typeof c === "string" ? c : "";
     }
   }
+  return "";
+}
 
-  bridge = { toolClient, upstream, emitter, toolSpecs, toolSpecsLoadedAt: Date.now() };
-
+export function createApp(deps: AppDeps): express.Express {
   const app = express();
   app.use(express.json({ limit: "10mb" }));
 
   app.get("/healthz", (_req, res) => {
     res.json({
       ok: true,
-      tool_count: bridge?.toolSpecs.length ?? 0,
-      tool_specs_loaded_at: bridge?.toolSpecsLoadedAt ?? 0,
-      observation_enabled: bridge?.emitter.enabled ?? false,
+      pi_processes: deps.pool.size(),
     });
   });
 
-  app.post("/v1/tool-specs/refresh", async (_req, res) => {
-    if (!bridge) return res.status(500).json({ error: "not initialised" });
-    bridge.toolSpecs = await bridge.toolClient.listToolSpecs();
-    bridge.toolSpecsLoadedAt = Date.now();
-    res.json({ tool_count: bridge.toolSpecs.length });
-  });
-
-  app.post("/v1/chat/completions", async (req: Request, res: Response) => {
-    if (!bridge) return res.status(500).json({ error: "not initialised" });
+  app.post("/v1/chat/completions", async (req, res) => {
     const userId = (req.header("X-User-Id") ?? "").trim() || "anonymous";
-    const chatId = req.header("X-Chat-Id")?.trim() || undefined;
-    const messageId = req.header("X-Message-Id")?.trim() || undefined;
-    const aohTraceId = `pi-${randomUUID().replace(/-/g, "").slice(0, 16)}`;
-    const sessionId = `owui-chat:${userId}:${chatId ?? "no-chat"}`;
+    const chatId = (req.header("X-Chat-Id") ?? "").trim() || `oneshot-${makeTraceId()}`;
+    const aohTraceId = makeTraceId();
     const wantStream = Boolean(req.body?.stream);
 
-    const skills = loadSkills(cfg.skillsDir, userId);
-    const overlays =
-      chatId && cfg.observationDir ? loadOverlays(cfg.observationDir, userId, chatId) : [];
-    const composed = composeMessages({
-      messages: req.body.messages ?? [],
-      skills,
-      overlays,
-    });
-    const messages = applyToMessages(composed.messages, overlays);
+    const messages = (req.body?.messages ?? []) as OwuiMessage[];
+    const userText = extractLatestUserText(messages);
+    if (!userText) {
+      res.status(400).json({ error: { message: "no user message in payload" } });
+      return;
+    }
 
-    bridge.emitter.emit({
-      stage: "before_provider_request",
-      trace_id: aohTraceId,
-      session_id: sessionId,
-      payload: {
-        owui_user_id: userId,
-        owui_chat_id: chatId,
-        owui_message_id: messageId,
-        model: req.body.model,
-        message_count: messages.length,
-        overlay: {
-          applied: overlays.length,
-          annotation_chars: composed.overlayCharCount,
-        },
-        skills: { applied: skills.length, preamble_chars: composed.skillCharCount, names: skills.map((s) => s.name) },
-        stream: wantStream,
-      },
+    const pi = deps.pool.acquire({ userId, chatId, aohTraceId });
+
+    // Collect events into a final response. Pi may emit several
+    // ``message_end`` events across the turn (one per LLM call); we keep
+    // only the last assistant text, then resolve on ``agent_end``.
+    let finalText = "";
+    let modelCalls = 0;
+    let toolCalls = 0;
+
+    const done = new Promise<void>((resolve, reject) => {
+      const timeoutMs = 5 * 60_000;
+      const timer = setTimeout(() => {
+        unsubscribe();
+        reject(new Error(`pi turn timed out after ${timeoutMs}ms`));
+      }, timeoutMs);
+
+      const unsubscribe = pi.onEvent((event) => {
+        const type = event.type as string | undefined;
+        if (type === "message_end") {
+          const message = event.message as
+            | { role?: string; content?: Array<{ type: string; text?: string }> }
+            | undefined;
+          if (message?.role === "assistant") {
+            modelCalls += 1;
+            for (const block of message.content ?? []) {
+              if (block.type === "toolCall") toolCalls += 1;
+              if (block.type === "text" && block.text) finalText = block.text;
+            }
+          }
+        } else if (type === "agent_end") {
+          clearTimeout(timer);
+          unsubscribe();
+          resolve();
+        }
+      });
     });
 
     try {
-      if (wantStream) {
-        res.setHeader("Content-Type", "text/event-stream");
-        res.setHeader("Cache-Control", "no-cache");
-        res.setHeader("X-Aoh-Trace-Id", aohTraceId);
-        // Phase 1: run the non-stream loop, then emit the final assistant
-        // message as a single SSE chunk + [DONE]. Phase 2 will switch to
-        // true upstream streaming with mid-flight tool dispatch.
-        const result = await runAgentLoop({
-          initialPayload: { ...req.body, messages },
-          toolSpecs: bridge.toolSpecs as Array<Record<string, unknown>>,
-          upstream: bridge.upstream,
-          toolClient: bridge.toolClient,
-          ctx: { userId, chatId, messageId, aohTraceId, maxIterations: cfg.maxToolIterations },
-          upstreamBaseUrl: cfg.upstreamBaseUrl,
-          upstreamApiKey: cfg.upstreamApiKey,
-        });
-        const final = result.finalResponse.choices?.[0]?.message;
-        const chunk = {
-          id: result.finalResponse.id,
-          choices: [{ index: 0, delta: { content: final?.content ?? "" }, finish_reason: "stop" }],
-          pi_adapter: { aoh_trace_id: aohTraceId, iterations: result.iterations },
-        };
-        res.write(`data: ${JSON.stringify(chunk)}\n\n`);
-        res.write("data: [DONE]\n\n");
-        res.end();
-        bridge.emitter.emit({
-          stage: "agent_loop_completed",
-          trace_id: aohTraceId,
-          session_id: sessionId,
-          payload: {
-            owui_chat_id: chatId,
-            owui_message_id: messageId,
-            iterations: result.iterations,
-            tool_call_count: result.toolCallCount,
-            stream: true,
-          },
-        });
-        return;
-      }
-      const result = await runAgentLoop({
-        initialPayload: { ...req.body, messages },
-        toolSpecs: bridge.toolSpecs as Array<Record<string, unknown>>,
-        upstream: bridge.upstream,
-        toolClient: bridge.toolClient,
-        ctx: { userId, chatId, messageId, aohTraceId, maxIterations: cfg.maxToolIterations },
-        upstreamBaseUrl: cfg.upstreamBaseUrl,
-        upstreamApiKey: cfg.upstreamApiKey,
-      });
-      bridge.emitter.emit({
-        stage: "agent_loop_completed",
-        trace_id: aohTraceId,
-        session_id: sessionId,
-        payload: {
-          owui_chat_id: chatId,
-          owui_message_id: messageId,
-          iterations: result.iterations,
-          tool_call_count: result.toolCallCount,
-          stream: false,
-        },
-      });
-      res.json({
-        ...result.finalResponse,
-        pi_adapter: {
-          aoh_trace_id: aohTraceId,
-          iterations: result.iterations,
-          tool_call_count: result.toolCallCount,
-          overlay: { applied: overlays.length, annotation_chars: composed.overlayCharCount },
-          skills: { applied: skills.length, preamble_chars: composed.skillCharCount, names: skills.map((s) => s.name) },
-        },
-      });
+      pi.send({ type: "prompt", message: userText });
+      await done;
     } catch (err) {
-      console.error("agent loop failed:", err);
-      bridge.emitter.emit({
-        stage: "agent_loop_failed",
-        trace_id: aohTraceId,
-        session_id: sessionId,
-        payload: { error: err instanceof Error ? err.message : String(err) },
-      });
+      console.error("turn failed:", err);
       res.status(502).json({ error: { message: err instanceof Error ? err.message : String(err) } });
+      return;
     }
+
+    const piMeta = {
+      aoh_trace_id: aohTraceId,
+      pi_pool_size: deps.pool.size(),
+      iterations: modelCalls,
+      tool_call_count: toolCalls,
+    };
+
+    if (wantStream) {
+      res.setHeader("Content-Type", "text/event-stream");
+      res.setHeader("Cache-Control", "no-cache");
+      res.setHeader("X-Aoh-Trace-Id", aohTraceId);
+      res.write(
+        `data: ${JSON.stringify({
+          id: `pi-${aohTraceId}`,
+          choices: [{ index: 0, delta: { content: finalText }, finish_reason: "stop" }],
+          pi_adapter: piMeta,
+        })}\n\n`,
+      );
+      res.write("data: [DONE]\n\n");
+      res.end();
+      return;
+    }
+
+    res.json({
+      id: `pi-${aohTraceId}`,
+      choices: [
+        {
+          index: 0,
+          message: { role: "assistant", content: finalText },
+          finish_reason: "stop",
+        },
+      ],
+      pi_adapter: piMeta,
+    });
   });
 
   return app;
 }
 
-// CLI entry — `node dist/server.js` or `npm start`
 const isMain = import.meta.url === `file://${process.argv[1]}`;
 if (isMain) {
   const cfg = getConfig();
-  createApp().then((app) => {
-    app.listen(cfg.port, "127.0.0.1", () => {
-      console.log(`pi-owui-bridge listening on http://127.0.0.1:${cfg.port}`);
-    });
+  const pool = new PiPool(cfg);
+  pool.start();
+  const app = createApp({ pool });
+  app.listen(cfg.port, "127.0.0.1", () => {
+    console.log(`pi-owui-bridge (RPC subprocess mode) listening on http://127.0.0.1:${cfg.port}`);
+  });
+  process.on("SIGTERM", () => {
+    pool.stop();
+    process.exit(0);
   });
 }

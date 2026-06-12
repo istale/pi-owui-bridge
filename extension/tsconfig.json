@@ -7,14 +7,12 @@
     "esModuleInterop": true,
     "skipLibCheck": true,
     "outDir": "dist",
-    "rootDir": "src",
-    "declaration": true,
+    "rootDir": ".",
+    "declaration": false,
     "noEmitOnError": false,
     "preserveSymlinks": true,
     "sourceMap": true,
-    "allowImportingTsExtensions": false,
     "resolveJsonModule": true
   },
-  "include": ["src/**/*.ts"],
-  "exclude": ["legacy", "extension", "node_modules"]
+  "include": ["owui-tools.ts"]
 }

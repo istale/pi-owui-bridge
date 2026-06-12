@@ -41,11 +41,17 @@ export async function run({ hub, bridge, mode, scriptFake, randomChatId, randomU
     payloadInspectBody = ins.body;
   }
 
+  // Stage 12: overlay application moved into Pi (it reads the hub's overlay
+  // snapshot natively when AOH_OBSERVATION_DIR is set). The bridge no longer
+  // synthesises an ``overlay`` meta block, so we assert at a different layer:
+  // (a) the hub recorded the mark, (b) the bridge round-tripped the turn,
+  // (c) the hub's overlay snapshot file exists where Pi would have read it.
+  const overlayState = await hub.getChatOverlay(userId, chatId);
   const checks = {
     mark_returned_200: markResp.status === 200,
     bridge_returned_200: resp.status === 200,
-    bridge_reports_overlay_applied: (overlayMeta?.applied ?? 0) >= 1,
-    bridge_reports_annotation_chars_gt_0: (overlayMeta?.annotation_chars ?? 0) > 0,
+    hub_lists_the_mark: (overlayState.body?.overlays ?? []).some((o) => o.mark === "stale"),
+    hub_snapshot_present: overlayState.body?.snapshot_present === true,
   };
   if (payloadInspectBody && payloadInspectBody.annotation_in_system_prompt !== undefined) {
     checks.hub_payload_has_stale_annotation =

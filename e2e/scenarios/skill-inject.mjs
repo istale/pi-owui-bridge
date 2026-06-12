@@ -2,7 +2,7 @@
  * Drop a tiny skill markdown for the user, send a turn, and confirm
  * the skill ends up in the system prompt the bridge reports back.
  */
-import { mkdirSync, rmSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, rmSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { tmpdir } from "node:os";
 import { finalText } from "../lib/script-fixtures.mjs";
@@ -35,11 +35,15 @@ export async function run({ bridge, mode, scriptFake, randomChatId, randomUserId
       messages: [{ role: "user", content: "hi" }],
     });
 
-    const meta = resp.body?.pi_adapter?.skills;
+    // Stage 12: bridge no longer reads skills (Pi does, by virtue of the
+    // symlinked .pi/skills/ directory under the per-process cwd). The
+    // assertion shifts: we wrote the skill file before the call, the
+    // bridge round-tripped the turn, and the skill file persisted on
+    // disk for Pi to have picked up. End-to-end "did the model actually
+    // see the skill" needs a real LLM (--mode=real) to assert against.
     const checks = {
       bridge_returned_200: resp.status === 200,
-      bridge_reports_skill_applied: (meta?.applied ?? 0) >= 1,
-      bridge_skill_name_matches: (meta?.names ?? []).includes(skillName),
+      skill_file_present_for_pi: existsSync(join(skillsRoot, `${skillName}.md`)),
     };
     const passed = Object.values(checks).every(Boolean);
 
@@ -51,7 +55,6 @@ export async function run({ bridge, mode, scriptFake, randomChatId, randomUserId
         chat_id: chatId,
         skill_name: skillName,
         skill_sentinel: sentinel,
-        pi_adapter_skills: meta,
       },
     };
   } finally {

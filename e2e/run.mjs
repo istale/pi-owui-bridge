@@ -60,6 +60,13 @@ async function startEphemeralBridge({ owuiUrl, sharedSecret, upstreamUrl, upstre
     AOH_UPSTREAM_API_KEY: upstreamKey,
     AOH_OBSERVATION_DIR: observationDir,
     AOH_SKILLS_DIR: skillsDir,
+    // Stage 12 — point at Pi CLI + the OWUI tools extension.
+    AOH_PI_CLI_PATH:
+      process.env.AOH_PI_CLI_PATH
+      ?? "/Users/istale/Documents/pi-agent-obervation/repos/pi/packages/coding-agent/dist/cli.js",
+    AOH_PI_EXTENSION_PATH:
+      process.env.AOH_PI_EXTENSION_PATH
+      ?? "/Users/istale/Documents/pi-agent-obervation/repos/pi-owui-bridge/extension/dist/owui-tools.js",
   };
   const repoRoot = join(__dirname, "..");
   const proc = spawn("node", ["dist/server.js"], { cwd: repoRoot, env, stdio: ["ignore", "pipe", "pipe"] });
