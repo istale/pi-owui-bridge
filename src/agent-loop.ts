@@ -12,6 +12,7 @@
  */
 import type { AssistantMessage, Message, ToolCall } from "./openai-types.js";
 import { runWithHarness } from "./pi-harness/runtime.js";
+import { runWithCodingAgent } from "./coding-agent-runtime.js";
 import type { ToolClient } from "./tool-client.js";
 import type { ToolSpec } from "./tool-client.js";
 import type { UpstreamClient, UpstreamRequest } from "./upstream.js";
@@ -37,12 +38,26 @@ function stringifyToolResult(result: { ok: boolean; result?: unknown; error_code
   return JSON.stringify({ error: result.error_code ?? "ToolError", message: result.error_message ?? "" });
 }
 
-export type RuntimeMode = "harness" | "self";
+export type RuntimeMode = "coding-agent" | "harness" | "self";
 
+/**
+ * Three backends behind one ``runAgentLoop`` entry point. Pick at process
+ * start via ``AOH_RUNTIME``:
+ *
+ * - ``coding-agent`` (default): full pi-coding-agent AgentSession. Bridge
+ *   is the communication layer only; the loop, tools, skills, sessions
+ *   all come from Pi. Upstream Pi improvements flow in via npm update.
+ * - ``harness``: lower-level pi-agent-core AgentHarness. Skips
+ *   pi-coding-agent's skill loader / project trust / file-tool defaults
+ *   but still rides on pi-ai for the model call.
+ * - ``self``: the original self-written OpenAI HTTP loop. Kept as a
+ *   fallback / A-B comparison only.
+ */
 export function resolveRuntime(envValue: string | undefined = process.env.AOH_RUNTIME): RuntimeMode {
   const v = (envValue ?? "").trim().toLowerCase();
   if (v === "self") return "self";
-  return "harness";
+  if (v === "harness") return "harness";
+  return "coding-agent";
 }
 
 export interface AgentLoopRunOptions {
@@ -62,8 +77,42 @@ export interface AgentLoopRunOptions {
 
 export async function runAgentLoop(opts: AgentLoopRunOptions): Promise<AgentLoopResult> {
   const runtime = opts.runtime ?? resolveRuntime();
+  if (runtime === "coding-agent") return runAgentLoopCodingAgent(opts);
   if (runtime === "harness") return runAgentLoopHarness(opts);
   return runAgentLoopSelf(opts);
+}
+
+async function runAgentLoopCodingAgent(opts: AgentLoopRunOptions): Promise<AgentLoopResult> {
+  if (!opts.upstreamBaseUrl || !opts.upstreamApiKey) {
+    throw new Error("coding-agent runtime requires upstreamBaseUrl + upstreamApiKey");
+  }
+  const out = await runWithCodingAgent({
+    messages: (opts.initialPayload.messages ?? []) as Message[],
+    modelId: (opts.initialPayload.model as string) ?? "MiniMax-M2",
+    toolSpecs: opts.toolSpecs as unknown as ToolSpec[],
+    toolClient: opts.toolClient,
+    ctx: opts.ctx,
+    hubBaseUrl: opts.upstreamBaseUrl,
+    hubApiKey: opts.upstreamApiKey,
+  });
+  const finalText = (out.assistant.content ?? [])
+    .filter((b) => b.type === "text")
+    .map((b) => (b as { type: "text"; text: string }).text)
+    .join("");
+  return {
+    finalResponse: {
+      id: `cca-${opts.ctx.aohTraceId}`,
+      choices: [
+        {
+          index: 0,
+          message: { role: "assistant" as const, content: finalText },
+          finish_reason: out.assistant.stopReason ?? "stop",
+        },
+      ],
+    },
+    iterations: out.modelCallCount,
+    toolCallCount: out.toolCallCount,
+  };
 }
 
 async function runAgentLoopHarness(opts: AgentLoopRunOptions): Promise<AgentLoopResult> {

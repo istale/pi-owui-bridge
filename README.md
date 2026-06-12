@@ -5,12 +5,13 @@ tool calls back to OWUI's HTTP tool service. Replaces the Python `pi-adapter`
 while leaving every other piece (Open WebUI's tool HTTP service, Hub overlay
 snapshots, ledger correlation) unchanged.
 
-> **Status: Phase 2.** The agent loop runs through Pi's `AgentHarness`
-> from `@earendil-works/pi-agent-core` by default (`AOH_RUNTIME=harness`).
-> Pi's `streamSimple` does the actual model call so upstream provider /
-> streaming fixes ride in via `npm update`. The legacy self-written loop
-> stays in `src/agent-loop.ts` behind `AOH_RUNTIME=self` for comparison
-> and emergency fallback.
+> **Status: Phase 3 (branch `feature/coding-agent-runtime`).** The default
+> runtime is **`pi-coding-agent`** — bridge is now the communication layer
+> only, with the agent loop, tools, skills, sessions, and compaction all
+> living in `@earendil-works/pi-coding-agent`. Upstream Pi improvements
+> flow in via `npm update @earendil-works/pi-coding-agent`. Two earlier
+> runtimes (`harness` direct pi-agent-core, `self` original DIY loop) stay
+> behind `AOH_RUNTIME` for comparison / fallback.
 
 ## Why TS
 
@@ -33,10 +34,11 @@ need that maintenance burden ourselves.
 
 ## Runtime mode
 
-| `AOH_RUNTIME=` | What it does |
-|---|---|
-| `harness` (default) | `runAgentLoop` delegates to `runWithHarness` in `src/pi-harness/runtime.ts`. AgentHarness drives the loop with `InMemorySessionRepo` (nothing persists to disk) and a Hub-backed Model built via pi-ai's provider system. |
-| `self` | The original Phase-1 self-written OpenAI HTTP loop. Kept as a fallback / A-B comparison. |
+| `AOH_RUNTIME=` | Brain lives in | Notes |
+|---|---|---|
+| `coding-agent` (default) | `@earendil-works/pi-coding-agent` (`createAgentSession`) | Bridge = comm layer only. `noTools:"builtin"` hides bash/read/edit/write; `InMemoryAuthStorage` holds the Hub key; tmpdir cwd/agentDir gets removed in a `finally`. |
+| `harness` | `@earendil-works/pi-agent-core` (`AgentHarness`) | Lower-level than `coding-agent` — skips pi-coding-agent's skill loader / project trust / default tool set. |
+| `self` | this repo (`src/agent-loop.ts`) | The original Phase-1 self-written OpenAI HTTP loop. Kept as a fallback / A-B comparison. |
 
 Both modes go through the same `server.ts` wiring (overlay, skills,
 observation, response shape) and emit byte-equivalent
