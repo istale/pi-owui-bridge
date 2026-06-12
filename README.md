@@ -53,9 +53,10 @@ AOH_PI_IDLE_EVICT_MS=300000                        # 5 min default
 
 ```sh
 npm install
-npm run build                              # compile src/ to dist/
-npm run --workspace=extension build  # or:
-( cd extension && npx tsc -p tsconfig.json )
+npm run build         # compiles both src/ → dist/ and extension/ → extension/dist/
+# or each half independently:
+npm run build:bridge
+npm run build:extension
 ```
 
 ## Run

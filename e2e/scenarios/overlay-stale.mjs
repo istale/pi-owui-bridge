@@ -6,6 +6,7 @@
  * can change what the model sees by editing memory, not the conversation.
  */
 import { finalText } from "../lib/script-fixtures.mjs";
+import { pollForPayload } from "../lib/poll-hub.mjs";
 
 export async function run({ hub, bridge, mode, scriptFake, randomChatId, randomUserId }) {
   const userId = randomUserId();
@@ -30,34 +31,32 @@ export async function run({ hub, bridge, mode, scriptFake, randomChatId, randomU
   const overlayMeta = resp.body?.pi_adapter?.overlay;
   const aohTraceId = resp.body?.pi_adapter?.aoh_trace_id;
 
-  // 3. payload-inspect against the hub confirms the annotation reached
-  //    the wire — the most defensible assertion we have.
-  // The hub only sees the trace if the bridge writes observation events.
-  // If observation isn't configured, fall back to inspecting the bridge
-  // response shape directly.
+  // 3. Wait briefly for the hub tailer to ingest the bridge's
+  //    before_provider_payload emission, then payload-inspect.
+  // Hub tailer is async; give it room to ingest the bridge's JSONL line.
+  await pollForPayload(hub, aohTraceId);
   let payloadInspectBody = null;
   if (aohTraceId) {
     const ins = await hub.payloadInspect(aohTraceId);
     payloadInspectBody = ins.body;
   }
 
-  // Stage 12: overlay application moved into Pi (it reads the hub's overlay
-  // snapshot natively when AOH_OBSERVATION_DIR is set). The bridge no longer
-  // synthesises an ``overlay`` meta block, so we assert at a different layer:
-  // (a) the hub recorded the mark, (b) the bridge round-tripped the turn,
-  // (c) the hub's overlay snapshot file exists where Pi would have read it.
+  // Stage 12.5: assertions tightened. The bridge now mirrors Pi's
+  // ``before_provider_payload`` events into the hub-readable observation
+  // tree keyed by our aoh_trace_id, so payload-inspect can give a
+  // direct answer to "did STALE actually reach the model?". A passing
+  // overlay-stale run REQUIRES the hub to report the annotation.
   const overlayState = await hub.getChatOverlay(userId, chatId);
   const checks = {
     mark_returned_200: markResp.status === 200,
     bridge_returned_200: resp.status === 200,
     hub_lists_the_mark: (overlayState.body?.overlays ?? []).some((o) => o.mark === "stale"),
     hub_snapshot_present: overlayState.body?.snapshot_present === true,
+    hub_received_payload_for_trace: payloadInspectBody?.payload_message_count > 0,
+    hub_payload_has_stale_annotation:
+      payloadInspectBody?.annotation_in_system_prompt === true &&
+      (payloadInspectBody?.annotation_mentions ?? []).includes("STALE"),
   };
-  if (payloadInspectBody && payloadInspectBody.annotation_in_system_prompt !== undefined) {
-    checks.hub_payload_has_stale_annotation =
-      payloadInspectBody.annotation_in_system_prompt === true &&
-      (payloadInspectBody.annotation_mentions ?? []).includes("STALE");
-  }
   const passed = Object.values(checks).every(Boolean);
 
   return {

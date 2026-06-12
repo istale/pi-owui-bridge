@@ -8,11 +8,10 @@
  * 10-20 user deployment never holds more than a handful at a time.
  */
 import { spawn, type ChildProcessWithoutNullStreams } from "node:child_process";
+import { createHash, randomUUID } from "node:crypto";
 import { existsSync, mkdirSync, mkdtempSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { randomUUID } from "node:crypto";
-import readline from "node:readline";
 
 import type { BridgeConfig } from "./config.js";
 
@@ -25,6 +24,14 @@ export interface PiProc {
   /** Forward each line of JSON Pi writes on stdout. */
   onEvent: (handler: (event: Record<string, unknown>) => void) => () => void;
   send: (command: Record<string, unknown>) => void;
+  /**
+   * Update the trace id the OWUI tools extension should stamp on
+   * outgoing HTTP calls for the *next* prompt. Bridge calls this right
+   * before ``send({type:"prompt"})`` for each new turn, otherwise the
+   * extension would keep using whatever trace id was pinned at spawn
+   * and cross-service correlation breaks on the second turn.
+   */
+  setActiveTraceId: (traceId: string) => void;
   kill: () => void;
 }
 
@@ -140,6 +147,27 @@ export class PiPool {
       }
     }
 
+    // Stage 12.5: align Pi's overlay reader (which keys by Pi session
+    // id) with the hub's chat-keyed snapshot. We compute a deterministic
+    // session id from (user, chat) and pin it on Pi via --session-id,
+    // then symlink the chat snapshot at the path the overlay reader
+    // expects. Without this, overlay-injection silently no-ops because
+    // the session id Pi spawns with doesn't match anything on disk.
+    const sessionId = deterministicSessionId(opts.userId, opts.chatId);
+    if (this.cfg.observationDir) {
+      try {
+        const overlayDir = join(this.cfg.observationDir, "overlays");
+        mkdirSync(overlayDir, { recursive: true });
+        const chatSnap = join(overlayDir, "chats", opts.userId, `${opts.chatId}.json`);
+        const piSnap = join(overlayDir, `${sessionId}.json`);
+        if (existsSync(chatSnap) && !existsSync(piSnap)) {
+          symlinkSync(chatSnap, piSnap);
+        }
+      } catch {
+        /* ignore — overlay assertion will catch the gap if it matters */
+      }
+    }
+
     const env = {
       ...process.env,
       // Pinned identity the extension's per-request callbacks need.
@@ -160,7 +188,8 @@ export class PiPool {
       "--mode",
       "rpc",
       "--no-builtin-tools",
-      "--no-session",
+      "--session-id",
+      sessionId,
       "--extension",
       this.cfg.extensionPath,
       "--provider",
@@ -168,23 +197,48 @@ export class PiPool {
       "--model",
       this.cfg.modelId,
     ];
+    // Pi's ResourceLoader only scans default skill dirs when
+    // includeDefaults is set, which createAgentSession does not enable.
+    // Pass the user's skills dir explicitly via ``--skill`` so the
+    // loader picks it up. Skip if the user has no skills dir at all.
+    if (this.cfg.skillsDir) {
+      const userSkillsDir = join(this.cfg.skillsDir, opts.userId);
+      if (existsSync(userSkillsDir)) {
+        args.push("--skill", userSkillsDir);
+      }
+    }
     const proc = spawn("node", args, { env, cwd, stdio: ["pipe", "pipe", "pipe"] }) as ChildProcessWithoutNullStreams;
 
     const listeners = new Set<(e: Record<string, unknown>) => void>();
-    const rl = readline.createInterface({ input: proc.stdout });
-    rl.on("line", (line) => {
-      if (!line.trim()) return;
-      let event: Record<string, unknown>;
-      try {
-        event = JSON.parse(line);
-      } catch {
-        return;
-      }
-      for (const l of listeners) {
+
+    // Pi RPC docs warn against using a generic line reader: Node's
+    // ``readline`` splits on Unicode line separators (U+2028, U+2029,
+    // etc.) which can appear inside legitimate string values in a JSON
+    // chunk and would corrupt JSONL framing. Pi guarantees `\n`-delimited
+    // JSON, so we split strictly on LF byte 0x0A.
+    let buffer = "";
+    proc.stdout.setEncoding("utf8");
+    proc.stdout.on("data", (chunk: string) => {
+      buffer += chunk;
+      let nl: number;
+      while ((nl = buffer.indexOf("\n")) !== -1) {
+        const line = buffer.slice(0, nl);
+        buffer = buffer.slice(nl + 1);
+        if (!line) continue;
+        let event: Record<string, unknown>;
         try {
-          l(event);
-        } catch (err) {
-          console.error("listener threw:", err);
+          event = JSON.parse(line);
+        } catch {
+          // not JSON or partial — drop and continue, framing is restored
+          // by the next newline.
+          continue;
+        }
+        for (const l of listeners) {
+          try {
+            l(event);
+          } catch (err) {
+            console.error("listener threw:", err);
+          }
         }
       }
     });
@@ -223,6 +277,19 @@ export class PiPool {
       }
     };
 
+    // Sidecar file the extension reads per-tool-call so the *current*
+    // turn's trace id stamps OWUI HTTP headers, not the trace id from
+    // process spawn.
+    const traceIdPath = join(cwd, ".aoh-current-trace-id");
+    writeFileSync(traceIdPath, opts.aohTraceId, "utf8");
+    const setActiveTraceId = (traceId: string): void => {
+      try {
+        writeFileSync(traceIdPath, traceId, "utf8");
+      } catch {
+        /* ignore — extension falls back to env */
+      }
+    };
+
     return {
       key,
       proc,
@@ -230,6 +297,7 @@ export class PiPool {
       lastActivityAt: Date.now(),
       onEvent,
       send,
+      setActiveTraceId,
       kill,
     };
   }
@@ -237,4 +305,18 @@ export class PiPool {
 
 export function makeTraceId(): string {
   return `pi-${randomUUID().replace(/-/g, "").slice(0, 16)}`;
+}
+
+/**
+ * Stable Pi session id per (user, chat). Same input → same id, so the
+ * hub's overlay snapshot path (keyed by chat) can be symlinked to where
+ * Pi's overlay reader looks (keyed by session id). The id format matches
+ * what Pi accepts on ``--session-id``: a hex string we derive
+ * deterministically.
+ */
+export function deterministicSessionId(userId: string, chatId: string): string {
+  const h = createHash("sha1").update(`${userId} ${chatId}`).digest("hex");
+  // Pi accepts UUID v4-ish 32-hex strings; we synthesise one that's clearly
+  // ours by prefixing the hash's first 32 chars with a fixed tag suffix.
+  return `aoh${h.slice(0, 29)}`;
 }
