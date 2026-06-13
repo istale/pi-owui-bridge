@@ -10,13 +10,11 @@
 import express from "express";
 
 import { getConfig } from "./config.js";
-import { BridgeObservationEmitter } from "./observation-emit.js";
 import type { Message as OwuiMessage } from "./openai-types.js";
 import { PiPool, makeTraceId } from "./pi-process.js";
 
 interface AppDeps {
   pool: PiPool;
-  emitter: BridgeObservationEmitter;
 }
 
 function extractLatestUserText(messages: OwuiMessage[]): string {
@@ -54,11 +52,17 @@ export function createApp(deps: AppDeps): express.Express {
     }
 
     const pi = deps.pool.acquire({ userId, chatId, aohTraceId });
-    const sessionId = `owui-chat:${userId}:${chatId}`;
 
     // Collect events into a final response. Pi may emit several
     // ``message_end`` events across the turn (one per LLM call); we keep
     // only the last assistant text, then resolve on ``agent_end``.
+    //
+    // The hub-readable observation events (``before_provider_request``
+    // payload mirror) are written from inside the extension running in
+    // the Pi process — Pi does NOT serialise those events to its RPC
+    // stdout, so a bridge-side listener for them is dead code. Anything
+    // we want recorded under our aoh_trace_id has to be emitted from
+    // the extension or the bridge.
     let finalText = "";
     let modelCalls = 0;
     let toolCalls = 0;
@@ -72,19 +76,7 @@ export function createApp(deps: AppDeps): express.Express {
 
       const unsubscribe = pi.onEvent((event) => {
         const type = event.type as string | undefined;
-        if (type === "before_provider_payload") {
-          // Re-key this event under OUR aoh_trace_id so the hub's
-          // /api/assertions/payload-inspect/<trace> endpoint can answer
-          // "what did the model actually see for this turn?". Pi emits
-          // the same shape on its own observation channel under its
-          // internal trace id; this emit is the bridge-side mirror.
-          deps.emitter.emit({
-            stage: "before_provider_payload",
-            traceId: aohTraceId,
-            sessionId,
-            payload: { model: event.model, payload: event.payload },
-          });
-        } else if (type === "message_end") {
+        if (type === "message_end") {
           const message = event.message as
             | { role?: string; content?: Array<{ type: string; text?: string }> }
             | undefined;
@@ -104,10 +96,10 @@ export function createApp(deps: AppDeps): express.Express {
     });
 
     try {
-      // Refresh the trace-id sidecar so this turn's OWUI tool calls
-      // stamp the correct id even when the Pi process was spawned
-      // earlier (and pinned the previous turn's id in env).
+      // Per-turn refresh — the user could have marked turns / written
+      // skills / generated a new aoh_trace_id since the Pi process spawned.
       pi.setActiveTraceId(aohTraceId);
+      pi.refreshOverlay();
       pi.send({ type: "prompt", message: userText });
       await done;
     } catch (err) {
@@ -160,8 +152,7 @@ if (isMain) {
   const cfg = getConfig();
   const pool = new PiPool(cfg);
   pool.start();
-  const emitter = new BridgeObservationEmitter(cfg.observationDir);
-  const app = createApp({ pool, emitter });
+  const app = createApp({ pool });
   app.listen(cfg.port, "127.0.0.1", () => {
     console.log(`pi-owui-bridge (RPC subprocess mode) listening on http://127.0.0.1:${cfg.port}`);
   });

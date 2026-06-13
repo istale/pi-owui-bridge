@@ -9,7 +9,7 @@
  */
 import { spawn, type ChildProcessWithoutNullStreams } from "node:child_process";
 import { createHash, randomUUID } from "node:crypto";
-import { existsSync, mkdirSync, mkdtempSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
+import { existsSync, lstatSync, mkdirSync, mkdtempSync, rmSync, symlinkSync, unlinkSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 
@@ -32,6 +32,14 @@ export interface PiProc {
    * and cross-service correlation breaks on the second turn.
    */
   setActiveTraceId: (traceId: string) => void;
+  /**
+   * Make sure the chat-keyed overlay snapshot the hub writes is reachable
+   * at the session-keyed path Pi's overlay reader expects. Must be called
+   * before each prompt — the user may have marked / unmarked turns *after*
+   * the Pi process was spawned, in which case the spawn-time symlink is
+   * stale (or missing).
+   */
+  refreshOverlay: () => void;
   kill: () => void;
 }
 
@@ -68,8 +76,12 @@ export class PiPool {
 
   /**
    * Get the Pi for this (user, chat), spawning one if absent.
-   * ``aohTraceId`` is pinned only on first spawn — subsequent prompts in
-   * the same chat thread reuse the process and that original trace id.
+   *
+   * Per-turn refresh: the caller is expected to invoke
+   * ``setActiveTraceId(currentTurnTraceId)`` and ``refreshOverlay()``
+   * before sending the next prompt so the sidecar files and overlay
+   * symlinks reflect the *current* turn rather than whatever was true
+   * at spawn time.
    */
   acquire(opts: SpawnOptions): PiProc {
     const key = `${opts.userId}${opts.chatId}`;
@@ -148,25 +160,11 @@ export class PiPool {
     }
 
     // Stage 12.5: align Pi's overlay reader (which keys by Pi session
-    // id) with the hub's chat-keyed snapshot. We compute a deterministic
-    // session id from (user, chat) and pin it on Pi via --session-id,
-    // then symlink the chat snapshot at the path the overlay reader
-    // expects. Without this, overlay-injection silently no-ops because
-    // the session id Pi spawns with doesn't match anything on disk.
+    // id) with the hub's chat-keyed snapshot via a deterministic id +
+    // symlink. The actual symlink work happens in refreshOverlay()
+    // below, called from spawn AND from each prompt — users may mark
+    // turns AFTER the Pi process is up.
     const sessionId = deterministicSessionId(opts.userId, opts.chatId);
-    if (this.cfg.observationDir) {
-      try {
-        const overlayDir = join(this.cfg.observationDir, "overlays");
-        mkdirSync(overlayDir, { recursive: true });
-        const chatSnap = join(overlayDir, "chats", opts.userId, `${opts.chatId}.json`);
-        const piSnap = join(overlayDir, `${sessionId}.json`);
-        if (existsSync(chatSnap) && !existsSync(piSnap)) {
-          symlinkSync(chatSnap, piSnap);
-        }
-      } catch {
-        /* ignore — overlay assertion will catch the gap if it matters */
-      }
-    }
 
     const env = {
       ...process.env,
@@ -183,11 +181,19 @@ export class PiPool {
       PI_CODING_AGENT_DIR: piAgentDir,
     };
 
+    // Tool selection: ``--exclude-tools bash,edit,write`` (denylist)
+    // rather than ``--tools read`` (allowlist, which would also hide
+    // every extension tool we register). Pi's read tool stays active so
+    // the ``<available_skills>`` system-prompt block surfaces; bash /
+    // edit / write are removed because chat users must not touch the
+    // host filesystem. Extension tools (list_datasets etc.) keep their
+    // default-on status.
     const args = [
       this.cfg.piCliPath,
       "--mode",
       "rpc",
-      "--no-builtin-tools",
+      "--exclude-tools",
+      "bash,edit,write",
       "--session-id",
       sessionId,
       "--extension",
@@ -290,6 +296,37 @@ export class PiPool {
       }
     };
 
+    // Overlay symlink refresher. The chat snapshot lifecycle is
+    // independent of the Pi process: a user may mark turns AFTER Pi
+    // spawned (need to make the link), or clear all marks (need to
+    // remove a stale link). Calling this is idempotent.
+    const observationDir = this.cfg.observationDir;
+    const refreshOverlay = (): void => {
+      if (!observationDir) return;
+      const overlayDir = join(observationDir, "overlays");
+      const chatSnap = join(overlayDir, "chats", opts.userId, `${opts.chatId}.json`);
+      const piSnap = join(overlayDir, `${sessionId}.json`);
+      try {
+        mkdirSync(overlayDir, { recursive: true });
+        const linkPresent = (() => {
+          try {
+            return lstatSync(piSnap).isSymbolicLink();
+          } catch {
+            return false;
+          }
+        })();
+        if (existsSync(chatSnap)) {
+          if (!linkPresent) symlinkSync(chatSnap, piSnap);
+        } else if (linkPresent) {
+          unlinkSync(piSnap);
+        }
+      } catch {
+        /* observability never breaks the agent */
+      }
+    };
+    // First call at spawn so the freshly-built Pi sees the right overlay.
+    refreshOverlay();
+
     return {
       key,
       proc,
@@ -298,6 +335,7 @@ export class PiPool {
       onEvent,
       send,
       setActiveTraceId,
+      refreshOverlay,
       kill,
     };
   }

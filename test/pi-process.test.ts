@@ -5,7 +5,7 @@
  * not Pi's actual behaviour.
  */
 import { afterEach, describe, expect, it } from "vitest";
-import { mkdirSync, mkdtempSync, readFileSync, writeFileSync } from "node:fs";
+import { mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 
@@ -141,6 +141,47 @@ describe("PiPool", () => {
     const bobA = pool.acquire({ userId: "bob", chatId: "cA", aohTraceId: "t2" });
     expect(bobA.proc.pid).not.toBe(aliceA.proc.pid);
     expect(pool.size()).toBe(2);
+  });
+
+  it("refreshOverlay creates the session-keyed symlink lazily when the chat snapshot appears", async () => {
+    const obsDir = mkdtempSync(join(tmpdir(), "aoh-obs-"));
+    const pool = new PiPool(makeConfig({ observationDir: obsDir }));
+    pools.push(pool);
+    const pi = pool.acquire({ userId: "alice", chatId: "c1", aohTraceId: "t1" });
+
+    // No chat snapshot yet → no symlink.
+    const overlaysDir = join(obsDir, "overlays");
+    expect(readdirSync(overlaysDir).filter((f) => f.startsWith("aoh"))).toHaveLength(0);
+
+    // Hub writes the chat snapshot AFTER Pi spawned.
+    const userDir = join(overlaysDir, "chats", "alice");
+    mkdirSync(userDir, { recursive: true });
+    writeFileSync(join(userDir, "c1.json"), '{"overlays":[]}');
+
+    pi.refreshOverlay();
+    const linked = readdirSync(overlaysDir).filter((f) => f.startsWith("aoh"));
+    expect(linked.length).toBe(1);
+    expect(readFileSync(join(overlaysDir, linked[0]!), "utf8")).toBe('{"overlays":[]}');
+  });
+
+  it("refreshOverlay tears down a stale symlink when the chat snapshot is gone", async () => {
+    const obsDir = mkdtempSync(join(tmpdir(), "aoh-obs-"));
+    const userDir = join(obsDir, "overlays", "chats", "alice");
+    mkdirSync(userDir, { recursive: true });
+    writeFileSync(join(userDir, "c1.json"), '{"overlays":[]}');
+
+    const pool = new PiPool(makeConfig({ observationDir: obsDir }));
+    pools.push(pool);
+    const pi = pool.acquire({ userId: "alice", chatId: "c1", aohTraceId: "t1" });
+
+    let linked = readdirSync(join(obsDir, "overlays")).filter((f) => f.startsWith("aoh"));
+    expect(linked.length).toBe(1);
+
+    // User clears all marks → hub deletes the chat snapshot.
+    rmSync(join(userDir, "c1.json"));
+    pi.refreshOverlay();
+    linked = readdirSync(join(obsDir, "overlays")).filter((f) => f.startsWith("aoh"));
+    expect(linked.length).toBe(0);
   });
 
   it("symlinks the user's skills dir into the spawned cwd's .pi/skills/", async () => {

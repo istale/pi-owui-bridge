@@ -59,19 +59,20 @@ export async function run({ bridge, hub, mode, scriptFake, randomChatId, randomU
     if (aohTraceId) {
       const ins = await hub.payloadInspect(aohTraceId);
       payloadInspectBody = ins.body;
-      nameMentionedInPayload = JSON.stringify(payloadInspectBody ?? {}).includes(skillName);
+      // The hub now exposes first_system_msg_excerpt so we can grep
+      // for the skill name in the actual system prompt Pi sent.
+      nameMentionedInPayload = (payloadInspectBody?.first_system_msg_excerpt ?? "").includes(skillName);
     }
-    // Pi gates the ``<available_skills>`` block behind ``--tools read``
-    // being active (skills assume the model can read their body files).
-    // Stage 12 ships with ``--no-builtin-tools`` so that block is
-    // suppressed; we record the gap as evidence but don't fail the
-    // scenario on it — exercising the full skill body injection needs
-    // a separate "real-tools" e2e variant. The assertions below cover
-    // every contract we can verify in fake mode.
+    // Stage 12.6: Pi launches with ``--tools read`` so the
+    // ``<available_skills>`` block actually appears in the system
+    // prompt. We can now assert at the wire level that the skill name
+    // reaches the model — proof that the user's per-user skill markdown
+    // is in front of the model on every turn, not just sitting on disk.
     const checks = {
       bridge_returned_200: resp.status === 200,
       skill_file_present_for_pi: existsSync(join(skillsRoot, skillName, "SKILL.md")),
       hub_received_payload_for_trace: payloadInspectBody?.payload_message_count > 0,
+      hub_payload_mentions_skill_name: nameMentionedInPayload,
     };
     const passed = Object.values(checks).every(Boolean);
 
@@ -83,7 +84,6 @@ export async function run({ bridge, hub, mode, scriptFake, randomChatId, randomU
         chat_id: chatId,
         skill_name: skillName,
         skill_sentinel: sentinel,
-        skill_name_visible_in_payload_informational: nameMentionedInPayload,
       },
     };
   } finally {

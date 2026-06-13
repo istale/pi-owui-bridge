@@ -7,11 +7,11 @@
  * time. Per-tool ``execute`` callbacks shell out to OWUI over HTTP with
  * the headers our service-to-service contract requires.
  *
- * Every per-(user, chat) Pi process gets its own instance of this
- * extension, so the per-request identity (X-User-Id, X-Chat-Id,
- * X-Aoh-Trace-Id) is fixed at spawn time via env vars set by the
- * bridge. We do NOT re-read env per request — a Pi RPC process is
- * single-tenant for its whole lifetime.
+ * Every per-(user, chat) Pi process is single-tenant: X-User-Id and
+ * X-Chat-Id are pinned at spawn from env, but X-Aoh-Trace-Id is read
+ * fresh from a sidecar file (<cwd>/.aoh-current-trace-id) on every
+ * tool execute() so per-turn trace correlation works even when the
+ * Pi process spans multiple OWUI chat completions.
  */
 
 import { appendFileSync, mkdirSync, readFileSync } from "node:fs";

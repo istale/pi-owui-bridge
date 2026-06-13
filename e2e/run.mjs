@@ -22,7 +22,7 @@ import { startFakeUpstream } from "./lib/fake-upstream.mjs";
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
 
-const ALL_SCENARIOS = ["stack-up", "tool-dispatch", "overlay-stale", "skill-inject"];
+const ALL_SCENARIOS = ["stack-up", "tool-dispatch", "overlay-stale", "overlay-stale-late", "skill-inject"];
 
 function parseArgs(argv) {
   const out = { mode: "fake", scenario: "all", reportFile: null };
