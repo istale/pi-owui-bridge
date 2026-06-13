@@ -40,6 +40,14 @@ export interface PiProc {
    * stale (or missing).
    */
   refreshOverlay: () => void;
+  /**
+   * Serialise turns on this Pi process. The Pi RPC stdin/stdout has no
+   * turn id, so two overlapping ``prompt`` sends would interleave their
+   * ``message_end`` / ``agent_end`` events and the trace-id sidecar
+   * would race. Callers MUST wrap the full setActiveTraceId →
+   * refreshOverlay → send → await(agent_end) sequence in ``runTurn``.
+   */
+  runTurn: <T>(fn: () => Promise<T>) => Promise<T>;
   kill: () => void;
 }
 
@@ -327,6 +335,17 @@ export class PiPool {
     // First call at spawn so the freshly-built Pi sees the right overlay.
     refreshOverlay();
 
+    // Per-process turn queue. Each call chains onto the tail of the
+    // previous turn's promise so a second HTTP request for the same
+    // (user, chat) waits for the first ``agent_end`` before touching
+    // the trace-id sidecar or pushing another ``prompt``.
+    let tail: Promise<unknown> = Promise.resolve();
+    const runTurn = <T>(fn: () => Promise<T>): Promise<T> => {
+      const next = tail.then(fn, fn);
+      tail = next.catch(() => undefined);
+      return next;
+    };
+
     return {
       key,
       proc,
@@ -336,6 +355,7 @@ export class PiPool {
       send,
       setActiveTraceId,
       refreshOverlay,
+      runTurn,
       kill,
     };
   }

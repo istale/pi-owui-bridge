@@ -96,12 +96,17 @@ export function createApp(deps: AppDeps): express.Express {
     });
 
     try {
-      // Per-turn refresh — the user could have marked turns / written
-      // skills / generated a new aoh_trace_id since the Pi process spawned.
-      pi.setActiveTraceId(aohTraceId);
-      pi.refreshOverlay();
-      pi.send({ type: "prompt", message: userText });
-      await done;
+      // Serialise turns on this Pi process — Pi RPC has no turn id, so
+      // two overlapping ``prompt`` sends would race on the trace-id
+      // sidecar and interleave ``message_end`` events under the wrong
+      // aoh_trace_id. The queue is per (user, chat) since the pool keys
+      // PiProc that way; cross-chat traffic still runs in parallel.
+      await pi.runTurn(async () => {
+        pi.setActiveTraceId(aohTraceId);
+        pi.refreshOverlay();
+        pi.send({ type: "prompt", message: userText });
+        await done;
+      });
     } catch (err) {
       console.error("turn failed:", err);
       res.status(502).json({ error: { message: err instanceof Error ? err.message : String(err) } });

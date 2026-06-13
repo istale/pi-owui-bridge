@@ -184,6 +184,39 @@ describe("PiPool", () => {
     expect(linked.length).toBe(0);
   });
 
+  it("runTurn serialises concurrent turns on the same Pi process", async () => {
+    const pool = new PiPool(makeConfig());
+    pools.push(pool);
+    const pi = pool.acquire({ userId: "alice", chatId: "c1", aohTraceId: "t1" });
+
+    const order: string[] = [];
+    let resolveFirst!: () => void;
+    const first = pi.runTurn(async () => {
+      order.push("first:start");
+      await new Promise<void>((r) => { resolveFirst = r; });
+      order.push("first:end");
+    });
+    const second = pi.runTurn(async () => {
+      order.push("second:start");
+    });
+    // Give the microtask queue a tick — second must NOT have started yet.
+    await new Promise((r) => setTimeout(r, 10));
+    expect(order).toEqual(["first:start"]);
+    resolveFirst();
+    await Promise.all([first, second]);
+    expect(order).toEqual(["first:start", "first:end", "second:start"]);
+  });
+
+  it("runTurn keeps the queue alive after a failed turn", async () => {
+    const pool = new PiPool(makeConfig());
+    pools.push(pool);
+    const pi = pool.acquire({ userId: "alice", chatId: "c1", aohTraceId: "t1" });
+
+    await expect(pi.runTurn(async () => { throw new Error("boom"); })).rejects.toThrow("boom");
+    const ok = await pi.runTurn(async () => "ok");
+    expect(ok).toBe("ok");
+  });
+
   it("symlinks the user's skills dir into the spawned cwd's .pi/skills/", async () => {
     const skillsRoot = mkdtempSync(join(tmpdir(), "aoh-skills-"));
     mkdirSync(join(skillsRoot, "alice"), { recursive: true });
