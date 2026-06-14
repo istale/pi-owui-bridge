@@ -13,7 +13,10 @@ export async function run({ owui, hub, bridge }) {
     owui_reachable: owuiHealth.status === 200,
     hub_reachable: hubHealth.status === 200,
     bridge_reachable: bridgeHealth.status === 200,
-    bridge_tool_count_ge_1: (bridgeHealth.body?.tool_count ?? 0) >= 1,
+    // Stage 12: bridge no longer discovers tools itself (Pi does, on subprocess
+    // startup, via the OWUI tools extension). Healthz now reports pi_processes
+    // — a sanity check that the bridge's pool surface is wired up.
+    bridge_reports_pi_pool: typeof bridgeHealth.body?.pi_processes === "number",
   };
   const passed = Object.values(checks).every(Boolean);
 

@@ -1,97 +1,94 @@
 # pi-owui-bridge
 
-TypeScript service that fronts Open WebUI's chat completions and dispatches
-tool calls back to OWUI's HTTP tool service. Replaces the Python `pi-adapter`
-while leaving every other piece (Open WebUI's tool HTTP service, Hub overlay
-snapshots, ledger correlation) unchanged.
+Communication layer between Open WebUI's chat API and a per-(user, chat)
+Pi subprocess running in `--mode rpc`. The bridge does **not** run an
+agent loop: that's Pi's job. The bridge just translates HTTP ↔ Pi RPC.
 
-> **Status: Phase 2.** The agent loop runs through Pi's `AgentHarness`
-> from `@earendil-works/pi-agent-core` by default (`AOH_RUNTIME=harness`).
-> Pi's `streamSimple` does the actual model call so upstream provider /
-> streaming fixes ride in via `npm update`. The legacy self-written loop
-> stays in `src/agent-loop.ts` behind `AOH_RUNTIME=self` for comparison
-> and emergency fallback.
+> **Status: Stage 12.** Brain lives in `pi --mode rpc`. Bridge is
+> ~300 lines of HTTP-to-stdio translation. The extension at
+> `extension/owui-tools.ts` teaches each Pi instance about Open WebUI's
+> 5 data-analysis HTTP tools.
 
-## Why TS
+## Architecture
 
-When Phase 2 lands, depending on `@earendil-works/pi-agent-core` means
-future upstream Pi improvements (provider compat, streaming bug fixes,
-retry tuning) flow in via `npm update` instead of being ported by hand.
-The Python `pi-adapter` reinvented an agent loop that would otherwise
-need that maintenance burden ourselves.
+```
+USER → Open WebUI → pi-owui-bridge ──RPC──> pi (subprocess) ──> Hub ──> MiniMax
+                       (this repo)            │
+                                              └ via owui-tools.ts extension
+                                                ──HTTP──> Open WebUI tool service
+```
 
-## What's in scope (Phase 1)
-
-- HTTP server with the same `/v1/chat/completions` contract as pi-adapter
-- Tool discovery + dispatch through the OWUI service
-- Skill markdown loaded per turn from `$AOH_SKILLS_DIR/<user>/*.md`
-- Overlay snapshot read from
-  `$AOH_OBSERVATION_DIR/overlays/chats/<user>/<chat>.json` and applied
-  through the mixed scheme (system-prompt annotation + hidden tombstone)
-- Observation events emitted as JSONL the hub tailer already ingests
-- 29 vitest cases covering each module
-
-## Runtime mode
-
-| `AOH_RUNTIME=` | What it does |
-|---|---|
-| `harness` (default) | `runAgentLoop` delegates to `runWithHarness` in `src/pi-harness/runtime.ts`. AgentHarness drives the loop with `InMemorySessionRepo` (nothing persists to disk) and a Hub-backed Model built via pi-ai's provider system. |
-| `self` | The original Phase-1 self-written OpenAI HTTP loop. Kept as a fallback / A-B comparison. |
-
-Both modes go through the same `server.ts` wiring (overlay, skills,
-observation, response shape) and emit byte-equivalent
-`pi_adapter.aoh_trace_id` / `pi_adapter.overlay` / `pi_adapter.skills`
-metadata so e2e scenarios run unchanged against either.
-
-## What's deferred
-
-- **Real mid-flight SSE streaming.** The `stream: true` endpoint
-  currently runs the non-stream loop end-to-end, then emits the final
-  assistant message as one SSE chunk plus `[DONE]`. The user sees the
-  full answer once the loop completes — not token-by-token. The
-  response carries `X-Aoh-Trace-Id` and the chunk includes
-  `pi_adapter.iterations` so callers can still inspect what happened.
-  Real streaming will land by subscribing to AgentHarness's
-  `text_delta` / `tool_call_arguments_delta` events.
+- **Bridge** owns: HTTP server, OpenAI-format ↔ Pi RPC translation,
+  per-(user_id, chat_id) Pi subprocess pool with idle eviction, symlinks
+  for skill / observation directories into each Pi's cwd, models.json
+  pre-seed pointing at Hub.
+- **Pi** owns: agent loop, model call, tool dispatch, system prompt
+  composition (skills, overlay annotation, hidden tombstone — all native
+  Pi features), compaction, retry, streaming.
+- **Extension** owns: discovering OWUI tool specs at session start and
+  shelling each `execute()` callback over HTTP to OWUI.
 
 ## Environment
 
 ```sh
-AOH_UPSTREAM_BASE_URL=http://127.0.0.1:43180/v1
-AOH_UPSTREAM_API_KEY=any
+AOH_UPSTREAM_BASE_URL=http://127.0.0.1:43180/v1   # Hub
+AOH_UPSTREAM_API_KEY=<any>                         # Hub auth pass-through
 AOH_UPSTREAM_MODEL=MiniMax-M2
+AOH_UPSTREAM_PROVIDER=aoh-hub                     # synthetic name in models.json
+
 AOH_OWUI_BASE_URL=http://127.0.0.1:8080
 AOH_PI_SHARED_SECRET=<shared with Open WebUI>
-AOH_OBSERVATION_DIR=~/.aoh/observation
-AOH_SKILLS_DIR=~/.aoh/skills
+
+AOH_OBSERVATION_DIR=~/.pi/observation              # Pi reads overlays from here
+AOH_SKILLS_DIR=~/.aoh/skills                       # symlinked into Pi cwd .pi/skills
+
+AOH_PI_CLI_PATH=/path/to/pi/packages/coding-agent/dist/cli.js
+AOH_PI_EXTENSION_PATH=/path/to/pi-owui-bridge/extension/dist/owui-tools.js
+
 AOH_BRIDGE_PORT=19000
+AOH_PI_IDLE_EVICT_MS=300000                        # 5 min default
+```
+
+## Build
+
+```sh
+npm install
+npm run build         # compiles both src/ → dist/ and extension/ → extension/dist/
+# or each half independently:
+npm run build:bridge
+npm run build:extension
 ```
 
 ## Run
 
 ```sh
-npm install
-npm run build
 npm start
-```
-
-Or in dev:
-
-```sh
-npm run dev
 ```
 
 ## Test
 
-```sh
-npm test
-```
-
-## Wire Open WebUI at it
-
-In OWUI's `.env`:
+End-to-end against real OWUI + Hub + fake upstream (no MiniMax cost):
 
 ```sh
-OPENAI_API_BASE_URLS=http://127.0.0.1:19000/v1
-OPENAI_API_KEYS=ignored
+AOH_PI_SHARED_SECRET=... \
+AOH_OBSERVATION_DIR=~/.pi/observation \
+AOH_SKILLS_DIR=~/.aoh/skills \
+  node e2e/run.mjs --mode=fake
+# 11/11 scenarios PASS
 ```
+
+### Release-time canary (real LLM)
+
+`e2e/canary.sh` runs a small subset against the real upstream so you
+catch provider-behaviour drift that fake-mode masks (header changes,
+streaming framing, schema strictness). Run before each release:
+
+```sh
+AOH_UPSTREAM_API_KEY=sk-real-key \
+AOH_PI_SHARED_SECRET=... \
+AOH_OBSERVATION_DIR=~/.pi/observation \
+  ./e2e/canary.sh
+```
+
+This is **not** nightly — it costs money and there's no live customer
+yet. Promote to a cron job once a real consumer is on the stack.

@@ -67,6 +67,25 @@ export class HubClient {
     const r = await fetch(url(this.baseUrl, `/api/assertions/payload-inspect/${traceId}`));
     return { status: r.status, body: await r.json() };
   }
+  async overlayState(sessionId) {
+    const r = await fetch(url(this.baseUrl, `/api/assertions/overlay/${sessionId}`));
+    return { status: r.status, body: await r.json() };
+  }
+  async sessionSummary(sessionId, since) {
+    const path = since
+      ? `/api/assertions/session-summary/${sessionId}?since=${encodeURIComponent(since)}`
+      : `/api/assertions/session-summary/${sessionId}`;
+    const r = await fetch(url(this.baseUrl, path));
+    return { status: r.status, body: await r.json() };
+  }
+  async setChatNote(userId, chatId, idx, note) {
+    const r = await fetch(url(this.baseUrl, `/api/chats/${userId}/${chatId}/messages/${idx}/note`), {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ note }),
+    });
+    return { status: r.status, body: await r.json() };
+  }
 }
 
 export class OwuiClient {

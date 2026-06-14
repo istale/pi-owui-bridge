@@ -1,12 +1,14 @@
 {
   "name": "pi-owui-bridge",
   "version": "0.1.0",
-  "description": "TypeScript service that fronts Open WebUI with an OpenAI-compatible agent loop and dispatches tool calls back to OWUI's HTTP tool service. Phase 1 runs its own loop; Phase 2 will swap it for @earendil-works/pi-agent-core's AgentHarness.",
+  "description": "Communication layer between Open WebUI and a per-(user, chat) pi-coding-agent subprocess running --mode rpc. The bridge owns HTTP/RPC translation; the agent loop, tools, skills, overlay, and compaction all live in Pi.",
   "type": "module",
   "private": true,
   "bin": { "pi-owui-bridge": "dist/server.js" },
   "scripts": {
-    "build": "tsc -p tsconfig.json",
+    "build": "tsc -p tsconfig.json && tsc -p extension/tsconfig.json",
+    "build:bridge": "tsc -p tsconfig.json",
+    "build:extension": "tsc -p extension/tsconfig.json",
     "start": "node dist/server.js",
     "dev": "node --import tsx src/server.ts",
     "test": "vitest --run",
