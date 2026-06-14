@@ -373,7 +373,7 @@ export function makeTraceId(): string {
  * deterministically.
  */
 export function deterministicSessionId(userId: string, chatId: string): string {
-  const h = createHash("sha1").update(`${userId} ${chatId}`).digest("hex");
+  const h = createHash("sha1").update(`${userId} ${chatId}`).digest("hex");
   // Pi accepts UUID v4-ish 32-hex strings; we synthesise one that's clearly
   // ours by prefixing the hash's first 32 chars with a fixed tag suffix.
   return `aoh${h.slice(0, 29)}`;

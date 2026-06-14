@@ -74,5 +74,21 @@ AOH_PI_SHARED_SECRET=... \
 AOH_OBSERVATION_DIR=~/.pi/observation \
 AOH_SKILLS_DIR=~/.aoh/skills \
   node e2e/run.mjs --mode=fake
-# 4/4 scenarios PASS
+# 11/11 scenarios PASS
 ```
+
+### Release-time canary (real LLM)
+
+`e2e/canary.sh` runs a small subset against the real upstream so you
+catch provider-behaviour drift that fake-mode masks (header changes,
+streaming framing, schema strictness). Run before each release:
+
+```sh
+AOH_UPSTREAM_API_KEY=sk-real-key \
+AOH_PI_SHARED_SECRET=... \
+AOH_OBSERVATION_DIR=~/.pi/observation \
+  ./e2e/canary.sh
+```
+
+This is **not** nightly — it costs money and there's no live customer
+yet. Promote to a cron job once a real consumer is on the stack.
