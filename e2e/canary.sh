@@ -1,10 +1,12 @@
 #!/usr/bin/env bash
 # Release-time canary: run a small subset of e2e scenarios against the
-# *real* upstream LLM to catch provider-behaviour drift that fake-mode
-# can't see (header changes, streaming framing, prompt template
+# real LLM provider (default MiniMax) to catch behaviour drift that
+# fake-mode can't see (header changes, streaming framing, prompt template
 # rejections, schema strictness, etc).
 #
 # Usage:
+#   AOH_LLM_API_KEY=sk-... ./e2e/canary.sh
+#   # or, with the deprecated alias still honoured:
 #   AOH_UPSTREAM_API_KEY=sk-... ./e2e/canary.sh
 #
 # This is NOT a nightly job — it costs real money and only catches
@@ -13,8 +15,8 @@
 # cron under repos/<provider>-canary.
 set -euo pipefail
 
-if [[ -z "${AOH_UPSTREAM_API_KEY:-}" ]]; then
-  echo "AOH_UPSTREAM_API_KEY must be set (real provider key)." >&2
+if [[ -z "${AOH_LLM_API_KEY:-}${AOH_UPSTREAM_API_KEY:-}" ]]; then
+  echo "AOH_LLM_API_KEY must be set (real provider key). Legacy AOH_UPSTREAM_API_KEY also accepted." >&2
   exit 1
 fi
 

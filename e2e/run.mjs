@@ -61,15 +61,18 @@ async function waitFor(predicate, label, timeoutMs = 15000) {
   throw new Error(`timed out waiting for ${label}`);
 }
 
-async function startEphemeralBridge({ owuiUrl, sharedSecret, upstreamUrl, upstreamKey, observationDir, skillsDir }) {
+async function startEphemeralBridge({ owuiUrl, sharedSecret, hubLikeUrl, hubLikeKey, observationDir, skillsDir }) {
   const port = 19500 + Math.floor(Math.random() * 100);
+  // In ``--mode=fake`` ``hubLikeUrl`` is the fake-upstream sink; in
+  // ``--mode=real`` it's MiniMax directly. From the bridge's POV both
+  // are "whatever AOH_HUB_BASE_URL says" — the bridge can't tell.
   const env = {
     ...process.env,
     AOH_BRIDGE_PORT: String(port),
     AOH_OWUI_BASE_URL: owuiUrl,
     AOH_PI_SHARED_SECRET: sharedSecret,
-    AOH_UPSTREAM_BASE_URL: upstreamUrl,
-    AOH_UPSTREAM_API_KEY: upstreamKey,
+    AOH_HUB_BASE_URL: hubLikeUrl,
+    AOH_HUB_API_KEY: hubLikeKey,
     AOH_OBSERVATION_DIR: observationDir,
     AOH_SKILLS_DIR: skillsDir,
     // Stage 12 — point at Pi CLI + the OWUI tools extension.
@@ -116,24 +119,29 @@ async function main() {
   const obsDir = env("AOH_OBSERVATION_DIR", mkdtempSync(join(tmpdir(), "aoh-e2e-obs-")));
   const skillsDir = env("AOH_SKILLS_DIR", mkdtempSync(join(tmpdir(), "aoh-e2e-skills-")));
 
-  let upstreamUrl;
-  let upstreamKey = env("AOH_UPSTREAM_API_KEY", "fake-key");
+  // ``hubLikeUrl/Key`` is what we pass to bridge as ``AOH_HUB_BASE_URL``.
+  // In real mode we deliberately point it past the hub straight at the
+  // LLM so the scenario exercises bridge ↔ Pi ↔ provider; in fake mode
+  // it's our local fake upstream. We also accept the deprecated
+  // ``AOH_UPSTREAM_*`` names so existing dev environments keep working.
+  let hubLikeUrl;
+  let hubLikeKey = env("AOH_LLM_API_KEY", env("AOH_UPSTREAM_API_KEY", "fake-key"));
   let fakeUpstream = null;
   if (args.mode === "fake") {
     fakeUpstream = await startFakeUpstream();
-    upstreamUrl = fakeUpstream.baseUrl;
+    hubLikeUrl = fakeUpstream.baseUrl;
   } else {
-    upstreamUrl = env("AOH_UPSTREAM_BASE_URL", "https://api.minimax.io/v1");
-    if (!process.env.AOH_UPSTREAM_API_KEY) {
-      throw new Error("AOH_UPSTREAM_API_KEY must be set in --mode=real");
+    hubLikeUrl = env("AOH_LLM_BASE_URL", env("AOH_UPSTREAM_BASE_URL", "https://api.minimax.io/v1"));
+    if (!process.env.AOH_LLM_API_KEY && !process.env.AOH_UPSTREAM_API_KEY) {
+      throw new Error("AOH_LLM_API_KEY must be set in --mode=real (legacy AOH_UPSTREAM_API_KEY also accepted)");
     }
   }
 
   const bridge = await startEphemeralBridge({
     owuiUrl,
     sharedSecret,
-    upstreamUrl,
-    upstreamKey,
+    hubLikeUrl,
+    hubLikeKey,
     observationDir: obsDir,
     skillsDir,
   });

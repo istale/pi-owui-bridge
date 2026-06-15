@@ -31,10 +31,10 @@ USER → Open WebUI → pi-owui-bridge ──RPC──> pi (subprocess) ──> 
 ## Environment
 
 ```sh
-AOH_UPSTREAM_BASE_URL=http://127.0.0.1:43180/v1   # Hub
-AOH_UPSTREAM_API_KEY=<any>                         # Hub auth pass-through
-AOH_UPSTREAM_MODEL=MiniMax-M2
-AOH_UPSTREAM_PROVIDER=aoh-hub                     # synthetic name in models.json
+AOH_HUB_BASE_URL=http://127.0.0.1:43180/v1        # where bridge forwards model calls
+AOH_HUB_API_KEY=<any>                              # hub auth pass-through
+AOH_MODEL_ID=MiniMax-M2
+AOH_MODEL_PROVIDER=aoh-hub                         # synthetic name in models.json
 
 AOH_OWUI_BASE_URL=http://127.0.0.1:8080
 AOH_PI_SHARED_SECRET=<shared with Open WebUI>
@@ -48,6 +48,15 @@ AOH_PI_EXTENSION_PATH=/path/to/pi-owui-bridge/extension/dist/owui-tools.js
 AOH_BRIDGE_PORT=19000
 AOH_PI_IDLE_EVICT_MS=300000                        # 5 min default
 ```
+
+> **Naming note** — older deploys used `AOH_UPSTREAM_BASE_URL` /
+> `AOH_UPSTREAM_API_KEY` / `AOH_UPSTREAM_MODEL` / `AOH_UPSTREAM_PROVIDER`.
+> Those are still accepted (with a deprecation warning) so existing
+> environments keep booting. New code should use the names above:
+> `AOH_HUB_*` for the proxy hop and `AOH_MODEL_*` for the model itself.
+> The reason for the rename: "upstream" is a reverse-proxy term that
+> read as the *LLM* to anyone outside the codebase, but the bridge's
+> upstream is actually the hub.
 
 ## Build
 
@@ -79,12 +88,12 @@ AOH_SKILLS_DIR=~/.aoh/skills \
 
 ### Release-time canary (real LLM)
 
-`e2e/canary.sh` runs a small subset against the real upstream so you
-catch provider-behaviour drift that fake-mode masks (header changes,
+`e2e/canary.sh` runs a small subset against the real LLM so you catch
+provider-behaviour drift that fake-mode masks (header changes,
 streaming framing, schema strictness). Run before each release:
 
 ```sh
-AOH_UPSTREAM_API_KEY=sk-real-key \
+AOH_LLM_API_KEY=sk-real-key \
 AOH_PI_SHARED_SECRET=... \
 AOH_OBSERVATION_DIR=~/.pi/observation \
   ./e2e/canary.sh

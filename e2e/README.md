@@ -30,8 +30,9 @@ Two modes:
 # tool-use → final-text responses. Suitable for CI / pre-merge gating.
 node e2e/run.mjs --mode=fake
 
-# real upstream: hits MiniMax (or whatever AOH_UPSTREAM_BASE_URL points
-# at) for one short turn per scenario, capped at 200 max_tokens.
+# real LLM: hits MiniMax (or whatever AOH_LLM_BASE_URL points at) for
+# one short turn per scenario, capped at 200 max_tokens. AOH_UPSTREAM_*
+# is still accepted as a deprecated alias.
 node e2e/run.mjs --mode=real
 ```
 
@@ -46,7 +47,7 @@ node e2e/run.mjs --mode=fake --scenario=overlay-stale
 | Mode | Need running |
 |---|---|
 | `fake` | OWUI backend, Hub, bridge (bridge gets a fake upstream injected; no MiniMax cost) |
-| `real` | OWUI backend, Hub, bridge (with real `AOH_UPSTREAM_API_KEY`) |
+| `real` | OWUI backend, Hub, bridge (with real `AOH_LLM_API_KEY`; legacy `AOH_UPSTREAM_API_KEY` works) |
 
 Set these env vars before running (same ones the bridge reads):
 
@@ -56,7 +57,7 @@ export AOH_BRIDGE_BASE_URL=http://127.0.0.1:19000
 export AOH_HUB_BASE_URL=http://127.0.0.1:43180
 export AOH_PI_SHARED_SECRET=<the shared secret>
 # real mode only:
-export AOH_UPSTREAM_API_KEY=<minimax key>
+export AOH_LLM_API_KEY=<minimax key>
 ```
 
 ## Output
