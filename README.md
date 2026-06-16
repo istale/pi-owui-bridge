@@ -9,6 +9,17 @@ agent loop: that's Pi's job. The bridge just translates HTTP ↔ Pi RPC.
 > `extension/owui-tools.ts` teaches each Pi instance about Open WebUI's
 > 5 data-analysis HTTP tools.
 
+## Setting up the whole AOH stack (4 repos)
+
+This repo includes the bootstrap scripts for the entire stack — pi,
+pi-owui-bridge, hub, open-webui-custom — at
+[`scripts/aoh/`](scripts/aoh/). Online and offline (air-gapped /
+enterprise-mirror-only) flows are both supported. Start there:
+
+```sh
+cat scripts/aoh/README.md
+```
+
 ## Architecture
 
 ```
